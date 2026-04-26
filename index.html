@@ -113,15 +113,15 @@ h2 { font-size:.9rem; margin-bottom:10px; color:#8899aa; }
         <label>支付 BNB 数量</label>
         <input type="number" id="buy-amount" placeholder="0.01" step="any" min="0" inputmode="decimal" oninput="estimateBuy()">
       </div>
+      <div class="form-group">
+        <label>滑点容差 (%)</label>
+        <input type="number" id="buy-slippage" value="2" step="0.1" min="0.1" max="50" inputmode="decimal" oninput="updateBuyMin()">
+      </div>
       <div class="estimate-box" id="buy-estimate" style="display:none">
         <div class="row"><span>预计获得代币</span><span id="buy-est-tokens">-</span></div>
+        <div class="row"><span>最小获得（含滑点）</span><span id="buy-est-min">-</span></div>
         <div class="row"><span>平台手续费</span><span id="buy-est-pfee">-</span></div>
         <div class="row"><span>创建者分成</span><span id="buy-est-cfee">-</span></div>
-      </div>
-      <div class="form-group">
-        <label>最小获得代币（滑点保护）</label>
-        <input type="number" id="buy-min" placeholder="0 = 不限制" step="any" min="0" inputmode="decimal">
-        <div class="form-hint">设 0 表示不做滑点检查</div>
       </div>
       <button class="btn-action btn-buy" onclick="doBuy()">买入</button>
     </div>
@@ -134,14 +134,15 @@ h2 { font-size:.9rem; margin-bottom:10px; color:#8899aa; }
           <button class="btn-max" onclick="fillMax('sell')">MAX</button>
         </div>
       </div>
+      <div class="form-group">
+        <label>滑点容差 (%)</label>
+        <input type="number" id="sell-slippage" value="2" step="0.1" min="0.1" max="50" inputmode="decimal" oninput="updateSellMin()">
+      </div>
       <div class="estimate-box" id="sell-estimate" style="display:none">
         <div class="row"><span>预计获得 BNB</span><span id="sell-est-bnb">-</span></div>
+        <div class="row"><span>最小获得（含滑点）</span><span id="sell-est-min">-</span></div>
         <div class="row"><span>平台手续费</span><span id="sell-est-pfee">-</span></div>
         <div class="row"><span>创建者分成</span><span id="sell-est-cfee">-</span></div>
-      </div>
-      <div class="form-group">
-        <label>最小获得 BNB（滑点保护）</label>
-        <input type="number" id="sell-min" placeholder="0 = 不限制" step="any" min="0" inputmode="decimal">
       </div>
       <button class="btn-action btn-sell" onclick="doSell()">卖出</button>
     </div>
@@ -238,6 +239,8 @@ let provider, signer, userAddr;
 let tokenContract, tokenAddress;
 let readProvider, readToken;
 let estimateTimer = null;
+let lastBuyEstTokens = 0n;
+let lastSellEstBnb = 0n;
 
 function fmt(val, dec = 6) {
   const s = ethers.formatEther(val);
@@ -337,6 +340,26 @@ function switchTab(name) {
   document.querySelectorAll('.tab-content').forEach(function(c){ c.classList.toggle('active', c.id === 'tab-' + name); });
 }
 
+function applySlippage(amount, slippagePct) {
+  var bps = Math.floor(parseFloat(slippagePct) * 100);
+  if (bps <= 0 || bps >= 10000) bps = 200;
+  return amount * BigInt(10000 - bps) / 10000n;
+}
+
+function updateBuyMin() {
+  if (lastBuyEstTokens === 0n) return;
+  var slip = document.getElementById('buy-slippage').value || '2';
+  var minOut = applySlippage(lastBuyEstTokens, slip);
+  document.getElementById('buy-est-min').textContent = fmt(minOut, 4);
+}
+
+function updateSellMin() {
+  if (lastSellEstBnb === 0n) return;
+  var slip = document.getElementById('sell-slippage').value || '2';
+  var minOut = applySlippage(lastSellEstBnb, slip);
+  document.getElementById('sell-est-min').textContent = fmt(minOut) + ' BNB';
+}
+
 async function estimateBuy() {
   clearTimeout(estimateTimer);
   estimateTimer = setTimeout(async function(){
@@ -346,12 +369,13 @@ async function estimateBuy() {
     try {
       var wei = ethers.parseEther(val);
       var est = await readToken.estimateBuy(wei);
+      lastBuyEstTokens = est.tokensOut;
       document.getElementById('buy-est-tokens').textContent = fmt(est.tokensOut, 4);
       document.getElementById('buy-est-pfee').textContent = fmt(est.platformFee) + ' BNB';
       document.getElementById('buy-est-cfee').textContent = fmt(est.creatorFee) + ' BNB';
-      document.getElementById('buy-min').value = fmt(est.tokensOut, 4);
+      updateBuyMin();
       box.style.display = 'block';
-    } catch (e) { box.style.display = 'none'; }
+    } catch (e) { box.style.display = 'none'; lastBuyEstTokens = 0n; }
   }, 300);
 }
 
@@ -364,12 +388,13 @@ async function estimateSell() {
     try {
       var amt = ethers.parseEther(val);
       var est = await readToken.estimateSell(amt);
+      lastSellEstBnb = est.bnbOut;
       document.getElementById('sell-est-bnb').textContent = fmt(est.bnbOut) + ' BNB';
       document.getElementById('sell-est-pfee').textContent = fmt(est.platformFee) + ' BNB';
       document.getElementById('sell-est-cfee').textContent = fmt(est.creatorFee) + ' BNB';
-      document.getElementById('sell-min').value = fmt(est.bnbOut);
+      updateSellMin();
       box.style.display = 'block';
-    } catch (e) { box.style.display = 'none'; }
+    } catch (e) { box.style.display = 'none'; lastSellEstBnb = 0n; }
   }, 300);
 }
 
@@ -411,8 +436,8 @@ async function doBuy() {
   if (!tokenContract) { showStatus('请先连接钱包', 'err'); return; }
   var val = document.getElementById('buy-amount').value;
   if (!val || parseFloat(val) <= 0) { showStatus('请输入 BNB 数量', 'err'); return; }
-  var minVal = document.getElementById('buy-min').value;
-  var minTokens = (minVal && parseFloat(minVal) > 0) ? ethers.parseEther(minVal) : 0n;
+  var slip = document.getElementById('buy-slippage').value || '2';
+  var minTokens = lastBuyEstTokens > 0n ? applySlippage(lastBuyEstTokens, slip) : 0n;
   try {
     showStatus('交易发送中...', 'warn');
     var tx = await tokenContract.buy(minTokens, { value: ethers.parseEther(val) });
@@ -427,8 +452,8 @@ async function doSell() {
   if (!tokenContract) { showStatus('请先连接钱包', 'err'); return; }
   var val = document.getElementById('sell-amount').value;
   if (!val || parseFloat(val) <= 0) { showStatus('请输入代币数量', 'err'); return; }
-  var minVal = document.getElementById('sell-min').value;
-  var minBnb = (minVal && parseFloat(minVal) > 0) ? ethers.parseEther(minVal) : 0n;
+  var slip = document.getElementById('sell-slippage').value || '2';
+  var minBnb = lastSellEstBnb > 0n ? applySlippage(lastSellEstBnb, slip) : 0n;
   try {
     showStatus('交易发送中...', 'warn');
     var tx = await tokenContract.sell(ethers.parseEther(val), minBnb);
